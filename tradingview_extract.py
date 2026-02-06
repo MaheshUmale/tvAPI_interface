@@ -58,6 +58,89 @@ def safe_get(data, keys, default=None):
             return default
     return data if data is not None else default
 
+GRAPHIC_TRANSLATOR = {
+    'extend': { 'r': 'right', 'l': 'left', 'b': 'both', 'n': 'none' },
+    'yLoc': { 'pr': 'price', 'ab': 'abovebar', 'bl': 'belowbar' },
+    'labelStyle': {
+        'n': 'none', 'xcr': 'xcross', 'cr': 'cross', 'tup': 'triangleup',
+        'tdn': 'triangledown', 'flg': 'flag', 'cir': 'circle', 'aup': 'arrowup',
+        'adn': 'arrowdown', 'lup': 'label_up', 'ldn': 'label_down', 'llf': 'label_left',
+        'lrg': 'label_right', 'llwlf': 'label_lower_left', 'llwrg': 'label_lower_right',
+        'luplf': 'label_upper_left', 'luprg': 'label_upper_right', 'lcn': 'label_center',
+        'sq': 'square', 'dia': 'diamond',
+    },
+    'lineStyle': {
+        'sol': 'solid', 'dot': 'dotted', 'dsh': 'dashed',
+        'al': 'arrow_left', 'ar': 'arrow_right', 'ab': 'arrow_both',
+    },
+    'boxStyle': { 'sol': 'solid', 'dot': 'dotted', 'dsh': 'dashed' },
+}
+
+def parse_graphic_data(raw_graphic, indexes):
+    """Parses raw graphical data into a readable format."""
+    res = {
+        'labels': [], 'lines': [], 'boxes': [], 'tables': [],
+        'polygons': [], 'horizLines': [], 'horizHists': []
+    }
+
+    # Labels
+    for l in raw_graphic.get('dwglabels', {}).values():
+        x_pos = l.get('x')
+        res['labels'].append({
+            'id': l.get('id'),
+            'x': indexes[x_pos] if isinstance(x_pos, int) and x_pos < len(indexes) else x_pos,
+            'y': l.get('y'),
+            'yLoc': GRAPHIC_TRANSLATOR['yLoc'].get(l.get('yl'), l.get('yl')),
+            'text': l.get('t'),
+            'style': GRAPHIC_TRANSLATOR['labelStyle'].get(l.get('st'), l.get('st')),
+            'color': l.get('ci'),
+            'textColor': l.get('tci'),
+            'size': l.get('sz'),
+            'textAlign': l.get('ta'),
+            'toolTip': l.get('tt'),
+        })
+
+    # Lines
+    for l in raw_graphic.get('dwglines', {}).values():
+        x1_pos = l.get('x1')
+        x2_pos = l.get('x2')
+        res['lines'].append({
+            'id': l.get('id'),
+            'x1': indexes[x1_pos] if isinstance(x1_pos, int) and x1_pos < len(indexes) else x1_pos,
+            'y1': l.get('y1'),
+            'x2': indexes[x2_pos] if isinstance(x2_pos, int) and x2_pos < len(indexes) else x2_pos,
+            'y2': l.get('y2'),
+            'extend': GRAPHIC_TRANSLATOR['extend'].get(l.get('ex'), l.get('ex')),
+            'style': GRAPHIC_TRANSLATOR['lineStyle'].get(l.get('st'), l.get('st')),
+            'color': l.get('ci'),
+            'width': l.get('w'),
+        })
+
+    # Boxes
+    for b in raw_graphic.get('dwgboxes', {}).values():
+        x1_pos = b.get('x1')
+        x2_pos = b.get('x2')
+        res['boxes'].append({
+            'id': b.get('id'),
+            'x1': indexes[x1_pos] if isinstance(x1_pos, int) and x1_pos < len(indexes) else x1_pos,
+            'y1': b.get('y1'),
+            'x2': indexes[x2_pos] if isinstance(x2_pos, int) and x2_pos < len(indexes) else x2_pos,
+            'y2': b.get('y2'),
+            'color': b.get('c'),
+            'bgColor': b.get('bc'),
+            'extend': GRAPHIC_TRANSLATOR['extend'].get(b.get('ex'), b.get('ex')),
+            'style': GRAPHIC_TRANSLATOR['boxStyle'].get(b.get('st'), b.get('st')),
+            'width': b.get('w'),
+            'text': b.get('t'),
+            'textSize': b.get('ts'),
+            'textColor': b.get('tc'),
+            'textVAlign': b.get('tva'),
+            'textHAlign': b.get('tha'),
+            'textWrap': b.get('tw'),
+        })
+
+    return res
+
 def get_brave_cookies():
     """Extracts required cookies from Brave browser using rookiepy."""
     if not rookiepy:
@@ -80,6 +163,8 @@ class TradingViewDataExtractor:
         self.running = False
         self.ohlc = []
         self.indicator_data = {}
+        self.graphics_raw = {}
+        self.graphics_indexes = []
         self.error_occurred = False
 
     def connect(self):
@@ -109,7 +194,7 @@ class TradingViewDataExtractor:
     def create_series(self, series_id="s1", timeframe="1D", range=100):
         self.send("create_series", [self.chart_session, "$prices", "s1", series_id, timeframe, range])
 
-    def create_study(self, study_id, indicator_metadata):
+    def create_study(self, study_id, indicator_metadata, custom_inputs=None):
         """Adds an indicator (study) to the chart session."""
         inputs = {"text": indicator_metadata["script"]}
         if "pineId" in indicator_metadata:
@@ -117,7 +202,13 @@ class TradingViewDataExtractor:
         if "pineVersion" in indicator_metadata:
             inputs["pineVersion"] = indicator_metadata["pineVersion"]
 
-        for input_id, input_val in indicator_metadata.get("inputs", {}).items():
+        final_inputs = indicator_metadata.get("inputs", {}).copy()
+        if custom_inputs:
+            for k, v in custom_inputs.items():
+                if k in final_inputs:
+                    final_inputs[k]["value"] = v
+
+        for input_id, input_val in final_inputs.items():
             inputs[input_id] = {
                 "v": input_val.get("value"),
                 "f": input_val.get("isFake", False),
@@ -137,14 +228,12 @@ class TradingViewDataExtractor:
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         }
 
-        # Handle CookieJar from rookiepy
         response = requests.get(url, headers=headers, cookies=cookies)
 
         try:
             data = response.json()
         except Exception as e:
             logger.error(f"Failed to parse metadata JSON: {e}")
-            logger.debug(f"Response text: {response.text[:500]}")
             raise
 
         if not isinstance(data, dict) or not data.get("success"):
@@ -158,11 +247,9 @@ class TradingViewDataExtractor:
         meta_inputs = metaInfo.get("inputs")
         if isinstance(meta_inputs, list):
             for input_item in meta_inputs:
-                if not isinstance(input_item, dict):
-                    continue
+                if not isinstance(input_item, dict): continue
                 input_id = input_item.get("id")
-                if input_id in ["text", "pineId", "pineVersion"]:
-                    continue
+                if input_id in ["text", "pineId", "pineVersion"]: continue
                 inputs[input_id] = {
                     "name": input_item.get("name"),
                     "type": input_item.get("type"),
@@ -177,7 +264,6 @@ class TradingViewDataExtractor:
                 if isinstance(style, dict) and "title" in style:
                     plots[plot_id] = style["title"].replace(" ", "_")
 
-        # Determine indicator type
         package_type = safe_get(metaInfo, ["package", "type"])
         extra_kind = safe_get(metaInfo, ["extra", "kind"])
         indicator_type = extra_kind or package_type or "study"
@@ -192,16 +278,14 @@ class TradingViewDataExtractor:
             "type": indicator_type
         }
 
-    def get_auth_token(self, cookies):
-        """Retrieves an auth token using session cookies."""
+    def get_user_data(self, cookies):
+        """Retrieves user data including auth_token and user_id using session cookies."""
         url = "https://www.tradingview.com/"
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         }
         try:
             session = requests.Session()
-
-            # If cookies is a list of dicts (common browser export format)
             if isinstance(cookies, list):
                 for cookie in cookies:
                     session.cookies.set(cookie.get('name'), cookie.get('value'), domain=cookie.get('domain', '.tradingview.com'))
@@ -209,21 +293,72 @@ class TradingViewDataExtractor:
 
             response = session.get(url, headers=headers, cookies=cookies, timeout=15)
 
-            logger.debug(f"Auth request status: {response.status_code}")
-            logger.debug(f"Final URL: {response.url}")
+            auth_token = re.search(r'"auth_token":"(.*?)"', response.text)
+            user_id = re.search(r'"id":([0-9]{1,10}),', response.text)
 
-            match = re.search(r'"auth_token":"(.*?)"', response.text)
-            if match:
-                token = match.group(1)
-                logger.info("Successfully extracted auth_token.")
-                return token
-            else:
-                logger.warning("auth_token not found in the response page.")
-                if "Log in" in response.text or "Sign in" in response.text:
-                    logger.warning("The response page seems to be a login/signup page. Your cookies might be invalid or expired.")
+            return {
+                "auth_token": auth_token.group(1) if auth_token else None,
+                "user_id": user_id.group(1) if user_id else None,
+                "username": re.search(r'"username":"(.*?)"', response.text).group(1) if re.search(r'"username":"(.*?)"', response.text) else None
+            }
         except Exception as e:
-            logger.error(f"Auth token retrieval failed: {e}")
+            logger.error(f"User data retrieval failed: {e}")
         return None
+
+    def get_private_indicators(self, cookies):
+        """Fetches all private (saved) indicators for the user."""
+        url = "https://pine-facade.tradingview.com/pine-facade/list"
+        params = {"filter": "saved"}
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        try:
+            response = requests.get(url, params=params, cookies=cookies, headers=headers)
+            return response.json()
+        except Exception as e:
+            logger.error(f"Failed to fetch private indicators: {e}")
+            return []
+
+    def list_layouts(self, cookies):
+        """Lists all chart layouts for the user."""
+        url = "https://www.tradingview.com/chart-storage-v2/charts/"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        try:
+            response = requests.get(url, cookies=cookies, headers=headers)
+            return response.json()
+        except Exception as e:
+            logger.error(f"Failed to list layouts: {e}")
+            return []
+
+    def get_chart_token(self, layout_id, user_id, cookies):
+        """Retrieves a chart token for a specific layout."""
+        url = "https://www.tradingview.com/chart-token"
+        params = {"image_url": layout_id, "user_id": user_id}
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        try:
+            response = requests.get(url, params=params, cookies=cookies, headers=headers)
+            return response.json().get("token")
+        except Exception as e:
+            logger.error(f"Failed to get chart token: {e}")
+            return None
+
+    def get_layout_sources(self, layout_id, chart_token, cookies):
+        """Fetches all sources (indicators/drawings) in a layout."""
+        url = f"https://charts-storage.tradingview.com/charts-storage/get/layout/{layout_id}/sources"
+        params = {"chart_id": "_shared", "jwt": chart_token}
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        try:
+            response = requests.get(url, params=params, cookies=cookies, headers=headers)
+            return response.json()
+        except Exception as e:
+            logger.error(f"Failed to fetch layout sources: {e}")
+            return {}
 
     def send(self, m, p):
         """Constructs and sends a message through the WebSocket."""
@@ -233,6 +368,26 @@ class TradingViewDataExtractor:
 
     def _handle_heartbeat(self, data):
         self.ws.send(prepend_header(data))
+
+    def get_mapped_indicator_data(self, study_id, indicator_metadata):
+        """Maps raw indicator data to plot names."""
+        raw_data = self.indicator_data.get(study_id, [])
+        if not raw_data: return []
+
+        plot_names = ["timestamp"] + list(indicator_metadata.get("plots", {}).values())
+        mapped_data = []
+        for row in raw_data:
+            mapped_row = {}
+            for i, val in enumerate(row):
+                if i < len(plot_names): mapped_row[plot_names[i]] = val
+                else: mapped_row[f"plot_{i-1}"] = val
+            mapped_data.append(mapped_row)
+        return mapped_data
+
+    def get_indicator_graphics(self, study_id):
+        """Returns parsed graphical drawings for the specified study."""
+        raw_graphic = self.graphics_raw.get(study_id, {})
+        return parse_graphic_data(raw_graphic, self.graphics_indexes)
 
     def listen(self):
         """Main loop for listening to WebSocket messages."""
@@ -246,36 +401,12 @@ class TradingViewDataExtractor:
                     else:
                         self.on_message(msg)
             except Exception as e:
-                if self.running:
-                    logger.error(f"WebSocket listening error: {e}")
+                if self.running: logger.error(f"WebSocket listening error: {e}")
                 self.running = False
-
-    def get_mapped_indicator_data(self, study_id, indicator_metadata):
-        """Maps raw indicator data to plot names."""
-        raw_data = self.indicator_data.get(study_id, [])
-        if not raw_data:
-            return []
-
-        # Sort plots by their IDs or use their order in metadata if available
-        # The WebSocket usually returns values in the order of plots defined in the indicator
-        plot_names = ["timestamp"] + list(indicator_metadata.get("plots", {}).values())
-
-        mapped_data = []
-        for row in raw_data:
-            mapped_row = {}
-            for i, val in enumerate(row):
-                if i < len(plot_names):
-                    mapped_row[plot_names[i]] = val
-                else:
-                    mapped_row[f"plot_{i-1}"] = val
-            mapped_data.append(mapped_row)
-        return mapped_data
 
     def on_message(self, msg):
         """Dispatches incoming messages to appropriate data structures."""
-        if not isinstance(msg, dict):
-            return
-
+        if not isinstance(msg, dict): return
         m_type = msg.get("m")
         p = msg.get("p", [])
 
@@ -283,16 +414,39 @@ class TradingViewDataExtractor:
             data = p[1]
             if "$prices" in data:
                 prices = data["$prices"].get("s", [])
-                for p_item in prices:
-                    self.ohlc.append(p_item['v'])
+                for p_item in prices: self.ohlc.append(p_item['v'])
 
             for key, val in data.items():
+                if not isinstance(val, dict): continue
                 if key.startswith("st"):
                     if "st" in val and val["st"]:
-                        if key not in self.indicator_data:
-                            self.indicator_data[key] = []
-                        for st_item in val["st"]:
-                            self.indicator_data[key].append(st_item["v"])
+                        if key not in self.indicator_data: self.indicator_data[key] = []
+                        for st_item in val["st"]: self.indicator_data[key].append(st_item["v"])
+
+                    ns = val.get("ns")
+                    if isinstance(ns, dict):
+                        if "indexes" in ns and ns["indexes"] != "nochange":
+                            self.graphics_indexes = ns["indexes"]
+                        if "d" in ns and ns["d"]:
+                            try:
+                                ns_data = json.loads(ns["d"])
+                                graphics_cmds = ns_data.get("graphicsCmds")
+                                if graphics_cmds:
+                                    if key not in self.graphics_raw: self.graphics_raw[key] = {}
+                                    for erase in graphics_cmds.get("erase", []):
+                                        action = erase.get("action")
+                                        draw_type = erase.get("type")
+                                        if action == "all":
+                                            if draw_type: self.graphics_raw[key][draw_type] = {}
+                                            else: self.graphics_raw[key] = {}
+                                        elif action == "one":
+                                            if draw_type in self.graphics_raw[key]: self.graphics_raw[key][draw_type].pop(erase.get("id"), None)
+                                    create = graphics_cmds.get("create", {})
+                                    for draw_type, groups in create.items():
+                                        if draw_type not in self.graphics_raw[key]: self.graphics_raw[key][draw_type] = {}
+                                        for group in groups:
+                                            for item in group.get("data", []): self.graphics_raw[key][draw_type][item["id"]] = item
+                            except Exception as e: logger.error(f"Failed to parse graphical data: {e}")
 
         elif m_type == "critical_error":
             logger.error(f"Critical error from server: {p}")
@@ -302,90 +456,112 @@ class TradingViewDataExtractor:
             self.error_occurred = True
 
 if __name__ == "__main__":
-    # EXAMPLE USAGE
-    # Attempt to get cookies from Brave automatically
+    # 1. Setup Cookies (Automatically from Brave or manually)
     cookies = get_brave_cookies()
-
-    # Fallback to manual cookies if automatic extraction fails
     if not cookies:
         cookies = {
-            'sessionid': 'YOUR_SESSION_ID',
-            'sessionid_sign': 'YOUR_SESSION_SIGN',
+            'sessionid': '04ldf2vb9uwfcayfs2mgtdwwli7jg82s',
+            'sessionid_sign': 'v3:SHw6hycY6WFsEgbr5vKI6ISfkr331Go/ovj3kaQyG1o=',
         }
-
-    symbol = "BINANCE:BTCUSDT"
-    indicator_id = "PUB;5xi4DbWeuIQrU0Fx6ZKiI2odDvIW9q2j"
 
     extractor = TradingViewDataExtractor()
 
     try:
-        # 1. Handle Authentication
-        if cookies and (isinstance(cookies, list) or cookies.get('sessionid') != 'YOUR_SESSION_ID'):
-            logger.info("Attempting to authenticate with cookies...")
-            auth_token = extractor.get_auth_token(cookies)
-            if auth_token:
-                extractor.token = auth_token
-                logger.info("Successfully authenticated.")
-            else:
-                logger.warning("Auth token retrieval failed. Proceeding with unauthorized token.")
+        # 2. Get User Data and Auth Token
+        user_data = extractor.get_user_data(cookies) or {}
+        if user_data.get("auth_token"):
+            extractor.token = user_data["auth_token"]
+            logger.info(f"Authenticated as {user_data.get('username')} (ID: {user_data.get('user_id')})")
         else:
-            logger.info("No valid cookies provided, using unauthorized token.")
+            logger.warning("Authentication failed. Using unauthorized token.")
 
-        # 2. Fetch Metadata
-        logger.info(f"Fetching metadata for {indicator_id}...")
-        meta_cookies = cookies if (isinstance(cookies, list) or (isinstance(cookies, dict) and cookies.get('sessionid') != 'YOUR_SESSION_ID')) else None
-        meta = extractor.get_indicator_metadata(indicator_id, cookies=meta_cookies)
-        logger.info(f"Indicator Loaded: {meta['description']}")
+        # 3. Discover Indicators
+        requested_indicator = {
+            "id": "USER;f9c7fa68b382417ba34df4122c632dcf",
+            "version": "1179.0",
+            "name": "Target Study"
+        }
+        indicators_to_load = [requested_indicator]
 
-        # 3. Connect and Start Listening
+        layouts = extractor.list_layouts(cookies)
+        target_symbol = "BINANCE:BTCUSDT"
+        if layouts and isinstance(layouts, list) and len(layouts) > 0:
+            latest_layout = layouts[0]
+            layout_id = latest_layout.get("url")
+            target_symbol = latest_layout.get("symbol", target_symbol)
+            logger.info(f"Found layout: {latest_layout.get('name')} ({layout_id}) on {target_symbol}")
+
+            chart_token = extractor.get_chart_token(layout_id, user_data.get("user_id"), cookies)
+            if chart_token:
+                sources = extractor.get_layout_sources(layout_id, chart_token, cookies)
+                for source_id, source in sources.get("payload", {}).get("sources", {}).items():
+                    if source.get("type") in ["study", "pine_study"]:
+                        meta_info = source.get("state", {}).get("metaInfo", {})
+                        ind_id = meta_info.get("id") or source.get("pineId")
+                        if ind_id and ind_id != requested_indicator["id"]:
+                            indicators_to_load.append({
+                                "id": ind_id,
+                                "name": meta_info.get("description") or source.get("description"),
+                                "inputs": source.get("state", {}).get("inputs")
+                            })
+
+        # 4. Connect to WebSocket
         extractor.connect()
-        listener_thread = threading.Thread(target=extractor.listen, daemon=True)
-        listener_thread.start()
+        threading.Thread(target=extractor.listen, daemon=True).start()
 
-        # 4. Set Up Chart
-        logger.info(f"Setting up chart for {symbol}...")
+        # 5. Set up Chart
         extractor.create_chart_session()
         time.sleep(1)
-        extractor.resolve_symbol(symbol)
+        extractor.resolve_symbol(target_symbol)
         time.sleep(1)
-        extractor.create_series(timeframe="1D", range=50)
+        extractor.create_series(timeframe="1D", range=100)
         time.sleep(2)
 
-        # 5. Add Indicator
-        study_id = generate_session("st_")
-        logger.info(f"Adding indicator with ID {study_id}...")
-        extractor.create_study(study_id, meta)
+        # 6. Load all indicators
+        loaded_indicators = []
+        for i, ind_info in enumerate(indicators_to_load):
+            try:
+                ind_id = ind_info["id"]
+                logger.info(f"Loading indicator {i+1}/{len(indicators_to_load)}: {ind_info['name']} ({ind_id})")
+                meta = extractor.get_indicator_metadata(ind_id, version=ind_info.get("version", "last"), cookies=cookies)
+                study_id = f"st{i+1}"
+                extractor.create_study(study_id, meta, custom_inputs=ind_info.get("inputs"))
+                loaded_indicators.append({"study_id": study_id, "meta": meta, "name": ind_info["name"]})
+                time.sleep(1)
+            except Exception as e:
+                logger.error(f"Failed to load indicator {ind_info['name']}: {e}")
 
-        # 6. Wait for Data
-        logger.info("Awaiting data stream...")
-        wait_start = time.time()
-        while time.time() - wait_start < 15:
-            if extractor.ohlc and study_id in extractor.indicator_data:
-                break
-            if extractor.error_occurred:
-                break
-            time.sleep(1)
+        # 7. Wait for data
+        logger.info("Awaiting data for all indicators...")
+        time.sleep(15)
 
-        # 7. Output Results
+        # 8. Output Results
         if extractor.ohlc:
-            logger.info(f"Extracted {len(extractor.ohlc)} OHLC bars.")
-            print("\n--- OHLC (Last 5) ---")
-            for bar in extractor.ohlc[-5:]:
-                print(bar)
+            print(f"\n--- OHLC for {target_symbol} (Last 5) ---")
+            for bar in extractor.ohlc[-5:]: print(bar)
 
-        if study_id in extractor.indicator_data:
-            logger.info(f"Extracted {len(extractor.indicator_data[study_id])} indicator points.")
-            mapped_data = extractor.get_mapped_indicator_data(study_id, meta)
-            print("\n--- Mapped Indicator Data (Last 5) ---")
-            for row in mapped_data[-5:]:
-                print(row)
-        else:
-            logger.warning("No indicator data received. This may require a valid session ID or different indicator.")
+        for ind in loaded_indicators:
+            study_id = ind["study_id"]
+            if study_id in extractor.indicator_data:
+                print(f"\n--- Numerical Data for {ind['name']} ({study_id}) (Last 3) ---")
+                mapped = extractor.get_mapped_indicator_data(study_id, ind["meta"])
+                for row in mapped[-3:]: print(row)
+
+            graphics = extractor.get_indicator_graphics(study_id)
+            has_graphics = any(graphics[k] for k in graphics if k != 'raw')
+            if has_graphics:
+                print(f"\n--- Graphical Output for {ind['name']} ({study_id}) ---")
+                for draw_type, items in graphics.items():
+                    if items:
+                        print(f"  {draw_type.capitalize()}: {len(items)} items")
+                        for item in items[:5]: print(f"    {item}")
+
+            if study_id not in extractor.indicator_data and not has_graphics:
+                logger.warning(f"No data received for {ind['name']}")
 
     except Exception as e:
-        logger.error(f"Main execution failed: {e}")
+        logger.error(f"Execution failed: {e}")
     finally:
         extractor.running = False
-        if extractor.ws:
-            extractor.ws.close()
+        if extractor.ws: extractor.ws.close()
         logger.info("Process finished.")
