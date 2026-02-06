@@ -158,6 +158,10 @@ class TradingViewDataExtractor:
     def __init__(self, token="unauthorized_user_token"):
         self.ws_url = "wss://data.tradingview.com/socket.io/websocket?type=chart"
         self.ws = None
+        self.session = requests.Session()
+        self.session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        })
         self.token = token
         self.chart_session = generate_session("cs_")
         self.running = False
@@ -166,6 +170,20 @@ class TradingViewDataExtractor:
         self.graphics_raw = {}
         self.graphics_indexes = []
         self.error_occurred = False
+
+    def set_cookies(self, cookies):
+        """Sets cookies for the session. Supports dict, list of dicts, or CookieJar."""
+        if not cookies:
+            return
+        if isinstance(cookies, list):
+            for c in cookies:
+                self.session.cookies.set(c.get('name'), c.get('value'), domain=c.get('domain', '.tradingview.com'), path=c.get('path', '/'))
+        elif isinstance(cookies, dict):
+            for name, value in cookies.items():
+                self.session.cookies.set(name, value, domain='.tradingview.com', path='/')
+        else:
+            # Assume it's a CookieJar or similar
+            self.session.cookies.update(cookies)
 
     def connect(self):
         """Establishes WebSocket connection and sends authentication token."""
@@ -221,14 +239,11 @@ class TradingViewDataExtractor:
 
         self.send("create_study", [self.chart_session, study_id, "st1", "$prices", indicator_type, inputs])
 
-    def get_indicator_metadata(self, indicator_id, version="last", cookies=None):
+    def get_indicator_metadata(self, indicator_id, version="last"):
         """Fetches indicator metadata from the Pine Facade API."""
         url = f"https://pine-facade.tradingview.com/pine-facade/translate/{indicator_id}/{version}"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        }
 
-        response = requests.get(url, headers=headers, cookies=cookies)
+        response = self.session.get(url)
 
         try:
             data = response.json()
@@ -278,20 +293,11 @@ class TradingViewDataExtractor:
             "type": indicator_type
         }
 
-    def get_user_data(self, cookies):
+    def get_user_data(self):
         """Retrieves user data including auth_token and user_id using session cookies."""
         url = "https://www.tradingview.com/"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        }
         try:
-            session = requests.Session()
-            if isinstance(cookies, list):
-                for cookie in cookies:
-                    session.cookies.set(cookie.get('name'), cookie.get('value'), domain=cookie.get('domain', '.tradingview.com'))
-                cookies = None
-
-            response = session.get(url, headers=headers, cookies=cookies, timeout=15)
+            response = self.session.get(url, timeout=15)
 
             auth_token = re.search(r'"auth_token":"(.*?)"', response.text)
             user_id = re.search(r'"id":([0-9]{1,10}),', response.text)
@@ -305,56 +311,44 @@ class TradingViewDataExtractor:
             logger.error(f"User data retrieval failed: {e}")
         return None
 
-    def get_private_indicators(self, cookies):
+    def get_private_indicators(self):
         """Fetches all private (saved) indicators for the user."""
         url = "https://pine-facade.tradingview.com/pine-facade/list"
         params = {"filter": "saved"}
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        }
         try:
-            response = requests.get(url, params=params, cookies=cookies, headers=headers)
+            response = self.session.get(url, params=params)
             return response.json()
         except Exception as e:
             logger.error(f"Failed to fetch private indicators: {e}")
             return []
 
-    def list_layouts(self, cookies):
+    def list_layouts(self):
         """Lists all chart layouts for the user."""
         url = "https://www.tradingview.com/chart-storage-v2/charts/"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        }
         try:
-            response = requests.get(url, cookies=cookies, headers=headers)
+            response = self.session.get(url)
             return response.json()
         except Exception as e:
             logger.error(f"Failed to list layouts: {e}")
             return []
 
-    def get_chart_token(self, layout_id, user_id, cookies):
+    def get_chart_token(self, layout_id, user_id):
         """Retrieves a chart token for a specific layout."""
         url = "https://www.tradingview.com/chart-token"
         params = {"image_url": layout_id, "user_id": user_id}
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        }
         try:
-            response = requests.get(url, params=params, cookies=cookies, headers=headers)
+            response = self.session.get(url, params=params)
             return response.json().get("token")
         except Exception as e:
             logger.error(f"Failed to get chart token: {e}")
             return None
 
-    def get_layout_sources(self, layout_id, chart_token, cookies):
+    def get_layout_sources(self, layout_id, chart_token):
         """Fetches all sources (indicators/drawings) in a layout."""
         url = f"https://charts-storage.tradingview.com/charts-storage/get/layout/{layout_id}/sources"
         params = {"chart_id": "_shared", "jwt": chart_token}
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        }
         try:
-            response = requests.get(url, params=params, cookies=cookies, headers=headers)
+            response = self.session.get(url, params=params)
             return response.json()
         except Exception as e:
             logger.error(f"Failed to fetch layout sources: {e}")
@@ -465,10 +459,11 @@ if __name__ == "__main__":
         }
 
     extractor = TradingViewDataExtractor()
+    extractor.set_cookies(cookies)
 
     try:
         # 2. Get User Data and Auth Token
-        user_data = extractor.get_user_data(cookies) or {}
+        user_data = extractor.get_user_data() or {}
         if user_data.get("auth_token"):
             extractor.token = user_data["auth_token"]
             logger.info(f"Authenticated as {user_data.get('username')} (ID: {user_data.get('user_id')})")
@@ -483,7 +478,7 @@ if __name__ == "__main__":
         }
         indicators_to_load = [requested_indicator]
 
-        layouts = extractor.list_layouts(cookies)
+        layouts = extractor.list_layouts()
         target_symbol = "BINANCE:BTCUSDT"
         if layouts and isinstance(layouts, list) and len(layouts) > 0:
             latest_layout = layouts[0]
@@ -491,9 +486,9 @@ if __name__ == "__main__":
             target_symbol = latest_layout.get("symbol", target_symbol)
             logger.info(f"Found layout: {latest_layout.get('name')} ({layout_id}) on {target_symbol}")
 
-            chart_token = extractor.get_chart_token(layout_id, user_data.get("user_id"), cookies)
+            chart_token = extractor.get_chart_token(layout_id, user_data.get("user_id"))
             if chart_token:
-                sources = extractor.get_layout_sources(layout_id, chart_token, cookies)
+                sources = extractor.get_layout_sources(layout_id, chart_token)
                 for source_id, source in sources.get("payload", {}).get("sources", {}).items():
                     if source.get("type") in ["study", "pine_study"]:
                         meta_info = source.get("state", {}).get("metaInfo", {})
@@ -523,7 +518,7 @@ if __name__ == "__main__":
             try:
                 ind_id = ind_info["id"]
                 logger.info(f"Loading indicator {i+1}/{len(indicators_to_load)}: {ind_info['name']} ({ind_id})")
-                meta = extractor.get_indicator_metadata(ind_id, version=ind_info.get("version", "last"), cookies=cookies)
+                meta = extractor.get_indicator_metadata(ind_id, version=ind_info.get("version", "last"))
                 study_id = f"st{i+1}"
                 extractor.create_study(study_id, meta, custom_inputs=ind_info.get("inputs"))
                 loaded_indicators.append({"study_id": study_id, "meta": meta, "name": ind_info["name"]})
