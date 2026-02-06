@@ -8,6 +8,11 @@ import threading
 import time
 import logging
 
+try:
+    import rookiepy
+except ImportError:
+    rookiepy = None
+
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -52,6 +57,19 @@ def safe_get(data, keys, default=None):
         else:
             return default
     return data if data is not None else default
+
+def get_brave_cookies():
+    """Extracts required cookies from Brave browser using rookiepy."""
+    if not rookiepy:
+        logger.error("rookiepy not installed. Cannot extract cookies from Brave automatically.")
+        return None
+    try:
+        logger.info("Extracting cookies from Brave...")
+        cookies = rookiepy.brave(['.tradingview.com'])
+        return cookies
+    except Exception as e:
+        logger.error(f"Failed to extract cookies from Brave: {e}")
+        return None
 
 class TradingViewDataExtractor:
     def __init__(self, token="unauthorized_user_token"):
@@ -119,6 +137,7 @@ class TradingViewDataExtractor:
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         }
 
+        # Handle CookieJar from rookiepy
         response = requests.get(url, headers=headers, cookies=cookies)
 
         try:
@@ -186,7 +205,7 @@ class TradingViewDataExtractor:
             if isinstance(cookies, list):
                 for cookie in cookies:
                     session.cookies.set(cookie.get('name'), cookie.get('value'), domain=cookie.get('domain', '.tradingview.com'))
-                cookies = None # Already added to session
+                cookies = None
 
             response = session.get(url, headers=headers, cookies=cookies, timeout=15)
 
@@ -231,6 +250,27 @@ class TradingViewDataExtractor:
                     logger.error(f"WebSocket listening error: {e}")
                 self.running = False
 
+    def get_mapped_indicator_data(self, study_id, indicator_metadata):
+        """Maps raw indicator data to plot names."""
+        raw_data = self.indicator_data.get(study_id, [])
+        if not raw_data:
+            return []
+
+        # Sort plots by their IDs or use their order in metadata if available
+        # The WebSocket usually returns values in the order of plots defined in the indicator
+        plot_names = ["timestamp"] + list(indicator_metadata.get("plots", {}).values())
+
+        mapped_data = []
+        for row in raw_data:
+            mapped_row = {}
+            for i, val in enumerate(row):
+                if i < len(plot_names):
+                    mapped_row[plot_names[i]] = val
+                else:
+                    mapped_row[f"plot_{i-1}"] = val
+            mapped_data.append(mapped_row)
+        return mapped_data
+
     def on_message(self, msg):
         """Dispatches incoming messages to appropriate data structures."""
         if not isinstance(msg, dict):
@@ -263,35 +303,37 @@ class TradingViewDataExtractor:
 
 if __name__ == "__main__":
     # EXAMPLE USAGE
-    # Replace with your actual cookies. You can use a dict, a list of dicts, or a CookieJar.
-    COOKIES = {
-        'sessionid': 'YOUR_SESSION_ID',
-        'sessionid_sign': 'YOUR_SESSION_SIGN',
-        # Add other cookies if authentication still fails
-    }
+    # Attempt to get cookies from Brave automatically
+    cookies = get_brave_cookies()
+
+    # Fallback to manual cookies if automatic extraction fails
+    if not cookies:
+        cookies = {
+            'sessionid': 'YOUR_SESSION_ID',
+            'sessionid_sign': 'YOUR_SESSION_SIGN',
+        }
 
     symbol = "BINANCE:BTCUSDT"
-    # Example of a public user indicator (ZigZag)
     indicator_id = "PUB;5xi4DbWeuIQrU0Fx6ZKiI2odDvIW9q2j"
 
     extractor = TradingViewDataExtractor()
 
     try:
         # 1. Handle Authentication
-        if COOKIES and COOKIES.get('sessionid') != 'YOUR_SESSION_ID':
+        if cookies and (isinstance(cookies, list) or cookies.get('sessionid') != 'YOUR_SESSION_ID'):
             logger.info("Attempting to authenticate with cookies...")
-            auth_token = extractor.get_auth_token(COOKIES)
+            auth_token = extractor.get_auth_token(cookies)
             if auth_token:
                 extractor.token = auth_token
                 logger.info("Successfully authenticated.")
             else:
                 logger.warning("Auth token retrieval failed. Proceeding with unauthorized token.")
         else:
-            logger.info("No cookies provided, using unauthorized token.")
+            logger.info("No valid cookies provided, using unauthorized token.")
 
         # 2. Fetch Metadata
         logger.info(f"Fetching metadata for {indicator_id}...")
-        meta_cookies = COOKIES if COOKIES and COOKIES.get('sessionid') != 'YOUR_SESSION_ID' else None
+        meta_cookies = cookies if (isinstance(cookies, list) or (isinstance(cookies, dict) and cookies.get('sessionid') != 'YOUR_SESSION_ID')) else None
         meta = extractor.get_indicator_metadata(indicator_id, cookies=meta_cookies)
         logger.info(f"Indicator Loaded: {meta['description']}")
 
@@ -333,9 +375,10 @@ if __name__ == "__main__":
 
         if study_id in extractor.indicator_data:
             logger.info(f"Extracted {len(extractor.indicator_data[study_id])} indicator points.")
-            print("\n--- Indicator Data (Last 5) ---")
-            for point in extractor.indicator_data[study_id][-5:]:
-                print(point)
+            mapped_data = extractor.get_mapped_indicator_data(study_id, meta)
+            print("\n--- Mapped Indicator Data (Last 5) ---")
+            for row in mapped_data[-5:]:
+                print(row)
         else:
             logger.warning("No indicator data received. This may require a valid session ID or different indicator.")
 
