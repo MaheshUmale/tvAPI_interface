@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PRODESK | TradingView Chart</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
+    <script src="https://cdn.socket.io/4.7.4/socket.io.min.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800;900&display=swap');
+        body { font-family: 'Inter', sans-serif; background-color: #000; color: #d1d5db; overflow: hidden; transition: background-color 0.3s, color 0.3s; }
+        body.light-theme { background-color: #f3f4f6; color: #111827; }
+        .glass-panel { background: rgba(17, 24, 39, 0.7); backdrop-filter: blur(12px); border: 1px solid rgba(255, 255, 255, 0.05); }
+        body.light-theme .glass-panel { background: rgba(255, 255, 255, 0.8); border: 1px solid rgba(0, 0, 0, 0.1); }
+        body.light-theme .text-white { color: #111827 !important; }
+        body.light-theme .text-gray-400 { color: #4b5563 !important; }
+        body.light-theme .bg-gray-900 { background-color: #e5e7eb !important; border-color: #d1d5db !important; color: #111827 !important; }
+        .custom-scrollbar::-webkit-scrollbar { width: 4px; height: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #374151; border-radius: 10px; }
+        .loading-bar { height: 2px; background: linear-gradient(to right, #3b82f6, #60a5fa); animation: loading 2s infinite; }
+        @keyframes loading { 0% { width: 0; } 50% { width: 100%; } 100% { width: 0; } }
+    </style>
+</head>
+<body class="h-full flex flex-col">
+    <div id="loading" class="hidden absolute top-0 left-0 w-full z-[100] loading-bar"></div>
+
+    <header class="h-14 py-2 glass-panel border-b border-white/5 sticky top-0 z-50 px-4 md:px-6 flex items-center">
+        <div class="flex items-center gap-6 w-full">
+            <span class="text-sm font-black text-white italic tracking-tighter uppercase shrink-0">PRO<span class="text-blue-500">DESK</span></span>
+
+            <div class="relative flex-1 max-w-2xl">
+                <input type="text" id="symbolSearch" placeholder="SEARCH SYMBOL (e.g. NSE:RELIANCE, BTCUSD)..." class="bg-gray-900 border border-gray-800 rounded-full px-6 py-2 text-sm font-bold text-gray-200 outline-none focus:ring-2 focus:ring-blue-500 transition-all w-full">
+                <div id="searchResults" class="hidden absolute top-full left-0 w-full bg-gray-900 border border-gray-800 rounded-xl mt-2 z-[100] max-h-80 overflow-y-auto custom-scrollbar shadow-2xl">
+                </div>
+            </div>
+
+            <div id="timeframeSelector" class="flex items-center gap-1 bg-gray-900/50 p-1 rounded-full border border-white/5 shrink-0">
+                <button data-interval="1" class="tf-btn active px-3 py-1 text-[11px] font-bold rounded-full transition-all">1m</button>
+                <button data-interval="5" class="tf-btn px-3 py-1 text-[11px] font-bold rounded-full transition-all">5m</button>
+                <button data-interval="15" class="tf-btn px-3 py-1 text-[11px] font-bold rounded-full transition-all">15m</button>
+                <button data-interval="60" class="tf-btn px-3 py-1 text-[11px] font-bold rounded-full transition-all">1h</button>
+                <button data-interval="D" class="tf-btn px-3 py-1 text-[11px] font-bold rounded-full transition-all">1d</button>
+            </div>
+
+            <div class="flex items-center gap-2 shrink-0">
+                <div id="normalControls" class="flex items-center gap-2">
+                    <button id="replayModeBtn" class="text-[10px] font-bold px-3 py-1 bg-blue-600 hover:bg-blue-700 rounded-full text-white transition-colors">REPLAY</button>
+                    <div class="flex items-center gap-1 bg-gray-900/50 p-1 rounded-full border border-white/5">
+                        <button id="zoomOutBtn" class="hover:bg-gray-800 p-1 rounded-full text-gray-400 hover:text-white transition-colors" title="Zoom Out">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 12H4"/></svg>
+                        </button>
+                        <button id="zoomInBtn" class="hover:bg-gray-800 p-1 rounded-full text-gray-400 hover:text-white transition-colors" title="Zoom In">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
+                        </button>
+                        <button id="resetZoomBtn" class="text-[10px] font-bold px-3 py-1 hover:bg-gray-800 rounded-full text-gray-400 hover:text-white transition-colors">RESET</button>
+                    </div>
+                </div>
+
+                <div id="replayControls" class="hidden flex items-center gap-2 bg-blue-900/20 p-1 rounded-full border border-blue-500/30">
+                    <span id="replayStatus" class="text-[9px] font-black text-blue-400 px-2 uppercase tracking-tighter">SELECT START POINT</span>
+                    <button id="replayPrevBtn" class="hover:bg-blue-500/20 p-1 rounded-full text-blue-400 disabled:opacity-30" disabled>
+                        <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20"><path d="M8.445 14.832A1 1 0 0010 14v-2.798l5.445 3.63A1 1 0 0017 14V6a1 1 0 00-1.555-.832L10 8.798V6a1 1 0 00-1.555-.832l-6 4a1 1 0 000 1.664l6 4z"/></svg>
+                    </button>
+                    <button id="replayPlayBtn" class="hover:bg-blue-500/20 p-1 rounded-full text-blue-400 disabled:opacity-30" disabled>
+                        <svg id="playIcon" class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20"><path d="M4.5 3.5v13L16.5 10l-12-6.5z"/></svg>
+                        <svg id="pauseIcon" class="hidden w-4 h-4" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zM7 8a1 1 0 012 0v4a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v4a1 1 0 102 0V8a1 1 0 00-1-1z" clip-rule="evenodd"/></svg>
+                    </button>
+                    <button id="replayNextBtn" class="hover:bg-blue-500/20 p-1 rounded-full text-blue-400 disabled:opacity-30" disabled>
+                        <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20"><path d="M11.555 14.832l6-4a1 1 0 000-1.664l-6-4A1 1 0 0010 6v2.798L4.555 5.168A1 1 0 003 6v8a1 1 0 001.555.832L10 11.202V14a1 1 0 001.555.832z"/></svg>
+                    </button>
+                    <button id="exitReplayBtn" class="text-[9px] font-bold px-3 py-1 hover:bg-red-900/40 rounded-full text-red-400 transition-colors">EXIT</button>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <main class="flex-1 p-0 flex flex-col overflow-hidden bg-black relative">
+        <div id="mainChart" class="flex-1 w-full h-full"></div>
+    </main>
+
+    <script src="/static/app.js?v=3"></script>
+</body>
+</html>
