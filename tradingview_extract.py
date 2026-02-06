@@ -44,6 +44,15 @@ def parse_messages(st):
                  res.append({"type": "ping", "data": m})
     return res
 
+def safe_get(data, keys, default=None):
+    """Safely access nested dictionary keys."""
+    for key in keys:
+        if isinstance(data, dict):
+            data = data.get(key)
+        else:
+            return default
+    return data if data is not None else default
+
 class TradingViewDataExtractor:
     def __init__(self, token="unauthorized_user_token"):
         self.ws_url = "wss://data.tradingview.com/socket.io/websocket?type=chart"
@@ -53,7 +62,7 @@ class TradingViewDataExtractor:
         self.running = False
         self.ohlc = []
         self.indicator_data = {}
-        self.error_occured = False
+        self.error_occurred = False
 
     def connect(self):
         """Establishes WebSocket connection and sends authentication token."""
@@ -103,60 +112,96 @@ class TradingViewDataExtractor:
 
         self.send("create_study", [self.chart_session, study_id, "st1", "$prices", indicator_type, inputs])
 
-    def get_indicator_metadata(self, indicator_id, version="last", session=None, signature=None):
+    def get_indicator_metadata(self, indicator_id, version="last", cookies=None):
         """Fetches indicator metadata from the Pine Facade API."""
         url = f"https://pine-facade.tradingview.com/pine-facade/translate/{indicator_id}/{version}"
-        headers = {}
-        if session:
-            cookie = f"sessionid={session}"
-            if signature:
-                cookie += f";sessionid_sign={signature}"
-            headers["Cookie"] = cookie
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
 
-        response = requests.get(url, headers=headers)
-        data = response.json()
+        response = requests.get(url, headers=headers, cookies=cookies)
 
-        if not data.get("success"):
-             raise Exception(f"Failed to get indicator metadata: {data.get('reason')}")
+        try:
+            data = response.json()
+        except Exception as e:
+            logger.error(f"Failed to parse metadata JSON: {e}")
+            logger.debug(f"Response text: {response.text[:500]}")
+            raise
 
-        result = data["result"]
-        metaInfo = result["metaInfo"]
+        if not isinstance(data, dict) or not data.get("success"):
+             reason = data.get("reason") if isinstance(data, dict) else "Unknown error"
+             raise Exception(f"Failed to get indicator metadata: {reason}")
+
+        result = data.get("result", {})
+        metaInfo = result.get("metaInfo", {})
 
         inputs = {}
-        for input_item in metaInfo.get("inputs", []):
-            if input_item["id"] in ["text", "pineId", "pineVersion"]:
-                continue
-            inputs[input_item["id"]] = {
-                "name": input_item["name"],
-                "type": input_item["type"],
-                "value": input_item.get("defval")
-            }
+        meta_inputs = metaInfo.get("inputs")
+        if isinstance(meta_inputs, list):
+            for input_item in meta_inputs:
+                if not isinstance(input_item, dict):
+                    continue
+                input_id = input_item.get("id")
+                if input_id in ["text", "pineId", "pineVersion"]:
+                    continue
+                inputs[input_id] = {
+                    "name": input_item.get("name"),
+                    "type": input_item.get("type"),
+                    "value": input_item.get("defval"),
+                    "isFake": input_item.get("isFake", False)
+                }
 
         plots = {}
-        for plot_id, style in metaInfo.get("styles", {}).items():
-            plots[plot_id] = style["title"].replace(" ", "_")
+        meta_styles = metaInfo.get("styles")
+        if isinstance(meta_styles, dict):
+            for plot_id, style in meta_styles.items():
+                if isinstance(style, dict) and "title" in style:
+                    plots[plot_id] = style["title"].replace(" ", "_")
+
+        # Determine indicator type
+        package_type = safe_get(metaInfo, ["package", "type"])
+        extra_kind = safe_get(metaInfo, ["extra", "kind"])
+        indicator_type = extra_kind or package_type or "study"
 
         return {
             "pineId": metaInfo.get("scriptIdPart", indicator_id),
-            "pineVersion": metaInfo.get("pine", {}).get("version", version),
+            "pineVersion": safe_get(metaInfo, ["pine", "version"], version),
             "description": metaInfo.get("description"),
             "inputs": inputs,
             "plots": plots,
-            "script": result["ilTemplate"],
-            "type": metaInfo.get("package", {}).get("type", "study")
+            "script": result.get("ilTemplate"),
+            "type": indicator_type
         }
 
-    def get_auth_token(self, session, signature=None):
+    def get_auth_token(self, cookies):
         """Retrieves an auth token using session cookies."""
         url = "https://www.tradingview.com/"
         headers = {
-            "Cookie": f"sessionid={session}" + (f";sessionid_sign={signature}" if signature else "")
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         }
         try:
-            response = requests.get(url, headers=headers, timeout=10)
+            session = requests.Session()
+
+            # If cookies is a list of dicts (common browser export format)
+            if isinstance(cookies, list):
+                for cookie in cookies:
+                    session.cookies.set(cookie.get('name'), cookie.get('value'), domain=cookie.get('domain', '.tradingview.com'))
+                cookies = None # Already added to session
+
+            response = session.get(url, headers=headers, cookies=cookies, timeout=15)
+
+            logger.debug(f"Auth request status: {response.status_code}")
+            logger.debug(f"Final URL: {response.url}")
+
             match = re.search(r'"auth_token":"(.*?)"', response.text)
             if match:
-                return match.group(1)
+                token = match.group(1)
+                logger.info("Successfully extracted auth_token.")
+                return token
+            else:
+                logger.warning("auth_token not found in the response page.")
+                if "Log in" in response.text or "Sign in" in response.text:
+                    logger.warning("The response page seems to be a login/signup page. Your cookies might be invalid or expired.")
         except Exception as e:
             logger.error(f"Auth token retrieval failed: {e}")
         return None
@@ -211,38 +256,43 @@ class TradingViewDataExtractor:
 
         elif m_type == "critical_error":
             logger.error(f"Critical error from server: {p}")
-            self.error_occured = True
+            self.error_occurred = True
         elif m_type == "study_error":
             logger.error(f"Study error for {p[1]}: {p[3]}")
-            self.error_occured = True
+            self.error_occurred = True
 
 if __name__ == "__main__":
     # EXAMPLE USAGE
-    # Replace these with actual credentials if available
-    SESSION_ID = "YOUR_SESSION_ID"
-    SESSION_SIGN = "YOUR_SESSION_SIGN"
+    # Replace with your actual cookies. You can use a dict, a list of dicts, or a CookieJar.
+    COOKIES = {
+        'sessionid': 'YOUR_SESSION_ID',
+        'sessionid_sign': 'YOUR_SESSION_SIGN',
+        # Add other cookies if authentication still fails
+    }
 
     symbol = "BINANCE:BTCUSDT"
-    indicator_id = "STD;RSI"
+    # Example of a public user indicator (ZigZag)
+    indicator_id = "PUB;5xi4DbWeuIQrU0Fx6ZKiI2odDvIW9q2j"
 
     extractor = TradingViewDataExtractor()
 
     try:
         # 1. Handle Authentication
-        if SESSION_ID != "YOUR_SESSION_ID":
-            logger.info("Attempting to login...")
-            auth_token = extractor.get_auth_token(SESSION_ID, SESSION_SIGN)
+        if COOKIES and COOKIES.get('sessionid') != 'YOUR_SESSION_ID':
+            logger.info("Attempting to authenticate with cookies...")
+            auth_token = extractor.get_auth_token(COOKIES)
             if auth_token:
                 extractor.token = auth_token
                 logger.info("Successfully authenticated.")
             else:
                 logger.warning("Auth token retrieval failed. Proceeding with unauthorized token.")
+        else:
+            logger.info("No cookies provided, using unauthorized token.")
 
         # 2. Fetch Metadata
         logger.info(f"Fetching metadata for {indicator_id}...")
-        meta_session = SESSION_ID if SESSION_ID != "YOUR_SESSION_ID" else None
-        meta_sign = SESSION_SIGN if SESSION_SIGN != "YOUR_SESSION_SIGN" else None
-        meta = extractor.get_indicator_metadata(indicator_id, session=meta_session, signature=meta_sign)
+        meta_cookies = COOKIES if COOKIES and COOKIES.get('sessionid') != 'YOUR_SESSION_ID' else None
+        meta = extractor.get_indicator_metadata(indicator_id, cookies=meta_cookies)
         logger.info(f"Indicator Loaded: {meta['description']}")
 
         # 3. Connect and Start Listening
@@ -270,7 +320,7 @@ if __name__ == "__main__":
         while time.time() - wait_start < 15:
             if extractor.ohlc and study_id in extractor.indicator_data:
                 break
-            if extractor.error_occured:
+            if extractor.error_occurred:
                 break
             time.sleep(1)
 
